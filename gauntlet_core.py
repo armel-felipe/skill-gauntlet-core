@@ -2,6 +2,7 @@
 
 import json
 import math
+import subprocess
 from copy import deepcopy
 from hashlib import sha256
 from numbers import Real
@@ -281,3 +282,68 @@ def validate_review(review, contract):
         "advisory": sorted(advisory),
         "gate_passed": gate_passed,
     }
+
+
+def _artifact_errors(root, artifact):
+    path = root / artifact
+    try:
+        resolved = path.resolve(strict=False)
+        resolved.relative_to(root)
+    except (OSError, ValueError):
+        return ["artifact escapes the workspace"]
+    errors = []
+    if path.is_symlink():
+        errors.append("artifact must not be a symlink")
+    if not resolved.exists():
+        errors.append("artifact does not exist")
+    elif not resolved.is_file():
+        errors.append("artifact must be a regular file")
+    else:
+        try:
+            size = resolved.stat().st_size
+        except OSError as error:
+            errors.append(f"artifact is not readable: {error}")
+        else:
+            if size == 0:
+                errors.append("artifact is empty")
+    return errors
+
+
+def run_checks(contract, workspace_root=None):
+    root = Path.cwd().resolve() if workspace_root is None else Path(workspace_root).resolve()
+    results = []
+    for check in contract["checks"]:
+        try:
+            completed = subprocess.run(
+                check["run"],
+                shell=True,
+                cwd=str(root),
+                text=True,
+                capture_output=True,
+                timeout=check["timeout_s"],
+            )
+        except subprocess.TimeoutExpired:
+            results.append(
+                {
+                    "name": check["name"],
+                    "status": "error",
+                    "exit_code": None,
+                    "output": f"timeout after {check['timeout_s']}s",
+                }
+            )
+            continue
+        except OSError as error:
+            results.append(
+                {"name": check["name"], "status": "error", "exit_code": None, "output": str(error)}
+            )
+            continue
+        output = (completed.stdout or "") + (completed.stderr or "")
+        results.append(
+            {
+                "name": check["name"],
+                "status": "pass" if completed.returncode == 0 else "fail",
+                "exit_code": completed.returncode,
+                "output": output.strip()[:2000],
+            }
+        )
+    return results
