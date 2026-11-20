@@ -190,3 +190,40 @@ def test_rejects_wrong_event_events(tmp_path):
     with pytest.raises(ValueError, match="events are incomplete"):
         run_gauntlet(lambda feedback: None, lambda artifact, feedback: approved_review(),
                      contract(), workspace_root=root)
+
+
+def test_checks_run_before_reviewer(tmp_path):
+    root = workspace(tmp_path)
+
+    def executor(feedback):
+        (root / "out" / "artefato.md").write_text("conteudo", encoding="utf-8")
+
+    def reviewer(artifact, feedback):
+        raise AssertionError("revisor nao deveria rodar")
+
+    result = run_gauntlet(
+        executor,
+        reviewer,
+        contract(checks=[{"name": "ruim", "run": "false"}]),
+        workspace_root=root,
+    )
+    assert result["status"] == "blocked"
+    assert result["failure_reasons"] == ["check failed: ruim"]
+    state = json.loads((root / "runs" / "teste" / "state.json").read_text(encoding="utf-8"))
+    assert state["status"] == "blocked"
+
+
+def test_missing_artifact_blocks_before_reviewer(tmp_path):
+    root = workspace(tmp_path)
+
+    def executor(feedback):
+        pass
+
+    def reviewer(artifact, feedback):
+        raise AssertionError("revisor nao deveria rodar")
+
+    result = run_gauntlet(executor, reviewer, contract(), workspace_root=root)
+    assert result["status"] == "blocked"
+    assert "artifact does not exist" in result["failure_reasons"]
+    state = json.loads((root / "runs" / "teste" / "state.json").read_text(encoding="utf-8"))
+    assert state["status"] == "blocked"

@@ -1,11 +1,11 @@
 ---
 name: gauntlet-core
 description: |
-  Executa uma tarefa em ciclos isolados de executor e revisor, com checks deterministicos,
-  gates numericos e bloqueio fail-closed. Os criterios de qualidade vem de um contrato JSON
-  da propria tarefa.
+  Executa uma tarefa em ciclos isolados de executor e revisor, com checks determinísticos,
+  gates numéricos e bloqueio fail-closed. Os critérios de qualidade vêm de um contrato JSON
+  da própria tarefa.
 
-  Acionada quando o usuario menciona:
+  Acionada quando o usuário menciona:
   - "roda o gauntlet"
   - "gauntlet com contrato"
   - "loop de qualidade ate passar"
@@ -47,6 +47,7 @@ Regra dura: nunca invente critério que a tarefa não declarou. Se faltar respos
 
 Escreva o contrato em JSON e valide com `load_contract`. Exemplo mínimo:
 
+```json
 {
   "name": "correcao-post",
   "goal": "Reescrever o draft corrigindo as falhas apontadas.",
@@ -58,6 +59,10 @@ Escreva o contrato em JSON e valide com `load_contract`. Exemplo mínimo:
   "persistence_dir": "runs/correcao-post",
   "run_id": "correcao-post-01"
 }
+```
+
+Dois exemplos completos para copiar: `contracts/contrato-editorial.json` e
+`contracts/contrato-codigo.json`.
 
 Erros comuns: critério vago ("qualidade"), gate frouxo para compensar revisor ruim, artefato
 absoluto, feedback sem `fix`, contrato sem nenhum critério bloqueante.
@@ -68,9 +73,6 @@ Com Python disponível, use o motor:
 
     from gauntlet_core import load_contract, run_gauntlet
 
-    contrato = load_contract("caminho/contrato.json")
-    resultado = run_gauntlet(executor, revisor, contrato, workspace_root=".")
-
     def executor(feedback):
         # task nova e isolada; escreve o artefato no caminho do contrato
         ...
@@ -78,6 +80,12 @@ Com Python disponível, use o motor:
     def revisor(artifact, feedback):
         # task nova e isolada, diferente do executor; devolve o review JSON
         ...
+
+    contrato = load_contract("caminho/contrato.json")
+    resultado = run_gauntlet(executor, revisor, contrato, workspace_root=".")
+
+No motor, os checks determinísticos rodam antes do revisor. O callback `revisor` recebe apenas
+`artifact` e `feedback`; o contrato chega por closure ou por caminho declarado.
 
 Sem Python, conduza os ciclos manualmente com as mesmas regras e marque o resultado com
 `"verified_by": "agent"` em vez de `"motor"`.
@@ -90,7 +98,22 @@ Protocolo obrigatório em cada ciclo:
 4. Chame o revisor em outra `task` nova, diferente do executor, entregando artefato, contrato e
    feedback. Ele devolve JSON com `decision`, `coverage`, `criteria`, `hard_failures`, `feedback`,
    `artifact` e, quando houver lacuna de cobertura, `coverage_gaps`.
-5. Aceite só JSON válido e completo. Texto livre, JSON truncado ou aprovação verbal não contam.
+
+   ```text
+   decision:       "approved" | "feedback"
+   coverage:       número de 0 a 1
+   criteria:       objeto com exatamente as chaves dos critérios do contrato; inteiros de 0 a 10
+   hard_failures:  lista
+   feedback:       lista de {"criterion", "kind": "required_fix" | "optional_suggestion", "fix"}
+   artifact:       string igual ao artifact do contrato
+   coverage_gaps:  lista de critérios do contrato (só quando houver lacuna de cobertura)
+   ```
+
+   `coverage_gate` vale 0.99 por padrão; ficar abaixo dele exige um `required_fix` ligado a um
+   critério declarado em `coverage_gaps`.
+5. Aceite só JSON válido e completo. Texto livre ou aprovação verbal não contam. JSON inválido,
+   truncado ou fora do schema é `blocked` terminal — nunca se repete o revisor para "tentar de
+   novo" a mesma saída.
 6. Se o gate reprovar com feedback completo, inicie o próximo ciclo com esse feedback.
 7. Pare em `approved` ou `blocked`. Nunca abra sexto ciclo.
 

@@ -595,6 +595,34 @@ def record_cycle(review, *, contract, cycle, workspace_root=None):
     return result
 
 
+def _persist_preflight(directory, contract, cycle, result):
+    if directory is None:
+        return
+    if directory.exists():
+        if not directory.is_dir() or any(item.is_symlink() for item in directory.iterdir()):
+            raise ValueError("invalid journal directory")
+        if (directory / "state.json").exists():
+            raise ValueError("journal already terminal")
+    cycles = sorted(directory.glob("cycle-*.json")) if directory.exists() else []
+    events = _load_json(directory / "events.json", [])
+    if not isinstance(events, list):
+        raise ValueError("journal events are not a list")
+    if len(cycles) != cycle - 1 or len(events) != 3 * (cycle - 1):
+        raise ValueError("journal history is incomplete")
+    events.extend(
+        [
+            {"cycle": cycle, "event": "cycle-start", "artifact": contract["artifact"]},
+            {
+                "cycle": cycle,
+                "event": "deterministic-checks",
+                "results": deepcopy(result.get("checks", [])),
+            },
+        ]
+    )
+    _atomic_write(directory / "events.json", events)
+    _atomic_write(directory / "state.json", result)
+
+
 def _resume(directory, contract, root):
     if not directory.exists():
         return 1, []
@@ -627,6 +655,12 @@ def _resume(directory, contract, root):
 
 
 def run_gauntlet(executor, reviewer, contract, workspace_root=None):
+    """Executa os ciclos com o executor e o revisor fornecidos.
+
+    Os checks deterministicos rodam aqui, antes de cada chamada ao revisor. No modo
+    conduzido por agente (record_cycle), quem chama precisa rodar os checks antes de
+    despachar o revisor.
+    """
     validated = validate_contract(contract)
     if not validated["valid"]:
         raise ValueError("contract is invalid: " + "; ".join(validated["errors"]))
@@ -641,6 +675,22 @@ def run_gauntlet(executor, reviewer, contract, workspace_root=None):
 
     while next_cycle <= contract["max_cycles"]:
         executor(deepcopy(feedback))
+        preflight_errors = _artifact_errors(root, contract["artifact"])
+        checks = [] if preflight_errors else run_checks(contract, root)
+        failed_checks = [
+            f"check failed: {item['name']}" for item in checks if item["status"] != "pass"
+        ]
+        if preflight_errors or failed_checks:
+            result = _blocked_cycle(
+                next_cycle,
+                preflight_errors or failed_checks,
+                contract["artifact"],
+                {},
+                [],
+                checks=checks,
+            )
+            _persist_preflight(directory, contract, next_cycle, result)
+            return result
         review = reviewer(contract["artifact"], deepcopy(feedback))
         result = record_cycle(review, contract=contract, cycle=next_cycle, workspace_root=root)
         if result["status"] != "retry":
