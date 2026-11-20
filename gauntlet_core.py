@@ -601,6 +601,9 @@ def _resume(directory, contract, root):
     if not directory.is_dir() or any(item.is_symlink() for item in directory.iterdir()):
         raise ValueError("invalid journal directory")
     files = sorted(directory.glob("cycle-*.json"))
+    expected_names = [f"cycle-{index:02d}.json" for index in range(1, len(files) + 1)]
+    if [path.name for path in files] != expected_names:
+        raise ValueError("journal cycle files are out of sequence")
     events = _load_json(directory / "events.json", [])
     if not isinstance(events, list):
         raise ValueError("journal events are not a list")
@@ -612,6 +615,8 @@ def _resume(directory, contract, root):
         expected = [contract["run_id"], contract["artifact"], index]
         if not isinstance(payload, dict) or payload.get("idempotency_key") != expected:
             raise ValueError("journal cycle does not match the contract")
+        if not _cycle_events_ok(events, index):
+            raise ValueError("journal events are incomplete")
         result = evaluate_cycle(
             payload.get("review"), contract=contract, cycle=index, workspace_root=root
         )

@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from gauntlet_core import run_gauntlet, validate_contract
@@ -132,3 +134,59 @@ def test_rejects_inconsistent_journal(tmp_path):
 def test_raises_on_invalid_contract():
     with pytest.raises(ValueError):
         run_gauntlet(lambda feedback: None, lambda artifact, feedback: {}, {"name": "x"})
+
+
+def test_rejects_cycle_file_out_of_sequence(tmp_path):
+    root = workspace(tmp_path)
+    directory = root / "runs" / "teste"
+    directory.mkdir(parents=True)
+    (directory / "cycle-03.json").write_text(
+        json.dumps(
+            {
+                "idempotency_key": ["run-1", "out/artefato.md", 1],
+                "review": retry_review(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (directory / "events.json").write_text(
+        json.dumps(
+            [
+                {"cycle": 1, "event": "cycle-start", "artifact": "out/artefato.md"},
+                {"cycle": 1, "event": "deterministic-checks", "results": []},
+                {"cycle": 1, "event": "review", "review": retry_review()},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="out of sequence"):
+        run_gauntlet(lambda feedback: None, lambda artifact, feedback: approved_review(),
+                     contract(), workspace_root=root)
+
+
+def test_rejects_wrong_event_events(tmp_path):
+    root = workspace(tmp_path)
+    directory = root / "runs" / "teste"
+    directory.mkdir(parents=True)
+    (directory / "cycle-01.json").write_text(
+        json.dumps(
+            {
+                "idempotency_key": ["run-1", "out/artefato.md", 1],
+                "review": retry_review(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (directory / "events.json").write_text(
+        json.dumps(
+            [
+                {"cycle": 1, "event": "cycle-start", "artifact": "out/artefato.md"},
+                {"cycle": 1, "event": "review", "review": retry_review()},
+                {"cycle": 1, "event": "review", "review": retry_review()},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="events are incomplete"):
+        run_gauntlet(lambda feedback: None, lambda artifact, feedback: approved_review(),
+                     contract(), workspace_root=root)
