@@ -2,7 +2,9 @@
 
 import json
 import math
+import os
 import subprocess
+import tempfile
 from copy import deepcopy
 from hashlib import sha256
 from numbers import Real
@@ -476,3 +478,93 @@ def evaluate_cycle(review, *, contract, cycle, workspace_root=None):
         "last_review": deepcopy(review),
         "checks": checks,
     }
+
+
+def _atomic_write(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=path.parent, prefix=path.name + ".", suffix=".tmp", delete=False
+    )
+    try:
+        json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    finally:
+        handle.close()
+    os.replace(handle.name, path)
+
+
+def _load_json(path, default):
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError(f"journal file is not valid JSON: {path}") from error
+
+
+def _journal_dir(contract, root):
+    if not contract["persistence_dir"]:
+        return None
+    return (root / contract["persistence_dir"]).resolve()
+
+
+def record_cycle(review, *, contract, cycle, workspace_root=None):
+    root = Path.cwd().resolve() if workspace_root is None else Path(workspace_root).resolve()
+    validated = validate_contract(contract)
+    if not validated["valid"]:
+        raise ValueError("contract is invalid: " + "; ".join(validated["errors"]))
+    contract = validated["contract"]
+    result = evaluate_cycle(review, contract=contract, cycle=cycle, workspace_root=root)
+
+    directory = _journal_dir(contract, root)
+    if directory is None:
+        return result
+
+    payload = {
+        "idempotency_key": [contract["run_id"], contract["artifact"], cycle],
+        "review": deepcopy(review),
+    }
+    path = directory / f"cycle-{cycle:02d}.json"
+
+    if directory.exists() and (
+        not directory.is_dir() or any(item.is_symlink() for item in directory.iterdir())
+    ):
+        raise ValueError("invalid journal directory")
+
+    if path.exists():
+        existing = _load_json(path, None)
+        if (
+            isinstance(existing, dict)
+            and existing.get("idempotency_key") == payload["idempotency_key"]
+            and existing.get("review") == payload["review"]
+        ):
+            return _load_json(directory / "state.json", None) or result
+        raise ValueError("cycle already recorded with different content")
+
+    if directory.exists():
+        if (directory / "state.json").exists():
+            raise ValueError("journal already terminal")
+
+    cycles = sorted(directory.glob("cycle-*.json")) if directory.exists() else []
+    events = _load_json(directory / "events.json", [])
+    if len(cycles) != cycle - 1 or len(events) != 3 * (cycle - 1):
+        raise ValueError("journal history is incomplete")
+
+    _atomic_write(path, payload)
+    events.extend(
+        [
+            {"cycle": cycle, "event": "cycle-start", "artifact": contract["artifact"]},
+            {
+                "cycle": cycle,
+                "event": "deterministic-checks",
+                "results": deepcopy(result.get("checks", [])),
+            },
+            {"cycle": cycle, "event": "review", "review": deepcopy(review)},
+        ]
+    )
+    _atomic_write(directory / "events.json", events)
+    if result["status"] != "retry":
+        _atomic_write(directory / "state.json", result)
+    return result
