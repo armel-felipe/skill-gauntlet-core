@@ -1,0 +1,9 @@
+{
+  "status": "approved",
+  "cycle_count": 1,
+  "last_artifact": "out/artefato.md",
+  "artifact_fingerprint": "sha256:exemplo",
+  "human_signoff": "pending",
+  "advisory": [],
+  "checks": []
+}

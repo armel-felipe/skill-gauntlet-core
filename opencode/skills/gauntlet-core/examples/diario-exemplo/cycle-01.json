@@ -1,0 +1,11 @@
+{
+  "idempotency_key": ["exemplo", "out/artefato.md", 1],
+  "review": {
+    "decision": "approved",
+    "coverage": 1.0,
+    "criteria": {"clareza": 9},
+    "hard_failures": [],
+    "feedback": [],
+    "artifact": "out/artefato.md"
+  }
+}

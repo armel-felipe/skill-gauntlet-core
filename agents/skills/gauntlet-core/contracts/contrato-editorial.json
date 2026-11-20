@@ -1,0 +1,18 @@
+{
+  "name": "correcao-post-editorial",
+  "goal": "Reescrever o draft corrigindo as falhas apontadas, preservando a voz do autor.",
+  "artifact": "content/drafts/post.md",
+  "criteria": [
+    {"name": "clareza", "description": "Cada paragrafo tem uma ideia principal identificavel na primeira leitura.", "gate": 9},
+    {"name": "voz_do_autor", "description": "Comparado ao guia de estilo do projeto, nao soa como texto generico de IA.", "gate": 9},
+    {"name": "rastreabilidade", "description": "Toda afirmacao factual aponta para uma fonte declarada.", "gate": 10},
+    {"name": "ritmo", "description": "Cadencia e variacao de frases; diagnostico, nao bloqueia.", "gate": 7, "blocking": false}
+  ],
+  "coverage_gate": 0.99,
+  "max_cycles": 5,
+  "checks": [
+    {"name": "sem-placeholder", "run": "! grep -n 'TODO\\|TBD' content/drafts/post.md", "timeout_s": 15}
+  ],
+  "persistence_dir": "runs/correcao-post",
+  "run_id": "correcao-post-01"
+}

@@ -1,0 +1,5 @@
+[
+  {"cycle": 1, "event": "cycle-start", "artifact": "out/artefato.md"},
+  {"cycle": 1, "event": "deterministic-checks", "results": []},
+  {"cycle": 1, "event": "review", "review": {"decision": "approved", "coverage": 1.0, "criteria": {"clareza": 9}, "hard_failures": [], "feedback": [], "artifact": "out/artefato.md"}}
+]
