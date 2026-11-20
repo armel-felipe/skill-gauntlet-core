@@ -61,13 +61,17 @@ Para Claude Code a partir de `~/.agents`, a skill `migrate-agent-skills` sincron
 
 Ou conduza ciclo a ciclo com `record_cycle`, quando o agente faz as chamadas `task`.
 
+O diário auditável (`cycle-NN.json`, `events.json`, `state.json`) é gravado sob
+`<persistence_dir>/<run_id>/`, então um `run_id` novo grava um diário novo e permite rodar o
+mesmo `persistence_dir` de novo.
+
 ## Desenvolvimento
 
-    pytest -q
     bash scripts/build-harness-copies.sh
-    pytest tests/test_harness_copies.py -q
+    pytest -q
 
-As cópias em `agents/`, `.claude/` e `opencode/` são geradas; teste garante que não divergem.
+As cópias em `agents/`, `.claude/` e `opencode/` são geradas; o teste garante que não divergem.
+Gere as cópias antes de rodar a suite quando `gauntlet_core.py` ou `SKILL.md` mudar.
 
 ## Licença
 

@@ -3,6 +3,7 @@
 import json
 import math
 import os
+import signal
 import subprocess
 import tempfile
 from copy import deepcopy
@@ -45,6 +46,21 @@ def _relative_error(value):
             return "must be relative to the workspace"
         if ".." in path.parts:
             return "must not escape the workspace"
+        if path.drive or path.root:
+            return "must not be drive-relative or rooted"
+    return None
+
+
+def _run_id_error(value):
+    if not isinstance(value, str) or not value.strip():
+        return "must be a non-empty string"
+    if value in (".", ".."):
+        return "must not be a reserved path component"
+    if "/" in value or "\\" in value:
+        return "must be a single path component"
+    win = PureWindowsPath(value)
+    if win.drive or win.root:
+        return "must be a single path component"
     return None
 
 
@@ -93,6 +109,8 @@ def validate_contract(contract):
         item_name = item.get("name")
         if not isinstance(item_name, str) or not item_name.strip():
             errors.append(f"{prefix}.name must be a non-empty string")
+        elif item_name != item_name.strip():
+            errors.append(f"{prefix}.name must not have surrounding whitespace")
         elif item_name in seen:
             errors.append(f"{prefix}.name duplicated: {item_name}")
         else:
@@ -154,8 +172,9 @@ def validate_contract(contract):
             errors.append(f"persistence_dir {persistence_error}")
 
     run_id = contract.get("run_id", "run")
-    if not isinstance(run_id, str) or not run_id.strip():
-        errors.append("run_id must be a non-empty string")
+    run_id_error = _run_id_error(run_id)
+    if run_id_error:
+        errors.append(f"run_id {run_id_error}")
 
     if errors:
         return {"valid": False, "errors": errors, "contract": None}
@@ -312,40 +331,58 @@ def _artifact_errors(root, artifact):
     return errors
 
 
+def _kill_group(process):
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except OSError:
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
 def run_checks(contract, workspace_root=None):
     root = Path.cwd().resolve() if workspace_root is None else Path(workspace_root).resolve()
     results = []
     for check in contract["checks"]:
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 check["run"],
                 shell=True,
                 cwd=str(root),
                 text=True,
-                capture_output=True,
-                timeout=check["timeout_s"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
             )
-        except subprocess.TimeoutExpired:
-            results.append(
-                {
-                    "name": check["name"],
-                    "status": "error",
-                    "exit_code": None,
-                    "output": f"timeout after {check['timeout_s']}s",
-                }
-            )
-            continue
         except OSError as error:
             results.append(
                 {"name": check["name"], "status": "error", "exit_code": None, "output": str(error)}
             )
             continue
-        output = (completed.stdout or "") + (completed.stderr or "")
+        try:
+            process.wait(timeout=check["timeout_s"])
+        except subprocess.TimeoutExpired:
+            _kill_group(process)
+            try:
+                stdout, stderr = process.communicate()
+            except OSError:
+                stdout, stderr = "", ""
+            partial = ((stdout or "") + (stderr or "")).strip()[:2000]
+            output = f"timeout after {check['timeout_s']}s"
+            if partial:
+                output += f": {partial}"
+            results.append(
+                {"name": check["name"], "status": "error", "exit_code": None, "output": output}
+            )
+            continue
+        stdout, stderr = process.communicate()
+        output = (stdout or "") + (stderr or "")
         results.append(
             {
                 "name": check["name"],
-                "status": "pass" if completed.returncode == 0 else "fail",
-                "exit_code": completed.returncode,
+                "status": "pass" if process.returncode == 0 else "fail",
+                "exit_code": process.returncode,
                 "output": output.strip()[:2000],
             }
         )
@@ -367,7 +404,7 @@ def _blocked_cycle(cycle, reasons, artifact, review, failed_criteria, checks=Non
     }
 
 
-def evaluate_cycle(review, *, contract, cycle, workspace_root=None):
+def evaluate_cycle(review, *, contract, cycle, workspace_root=None, checks=None):
     root = Path.cwd().resolve() if workspace_root is None else Path(workspace_root).resolve()
     if not _is_int(cycle) or not 1 <= cycle <= contract["max_cycles"]:
         raise ValueError("cycle must be an integer within max_cycles")
@@ -376,22 +413,21 @@ def evaluate_cycle(review, *, contract, cycle, workspace_root=None):
     if not validation["valid"]:
         return _blocked_cycle(cycle, validation["errors"], contract["artifact"], review, [])
 
+    if review["hard_failures"]:
+        return _blocked_cycle(cycle, review["hard_failures"], contract["artifact"], review, [])
+
     artifact_errors = _artifact_errors(root, contract["artifact"])
     if artifact_errors:
         return _blocked_cycle(cycle, artifact_errors, contract["artifact"], review, [])
 
-    checks = run_checks(contract, root)
+    if checks is None:
+        checks = run_checks(contract, root)
     failed_checks = [
         f"check failed: {item['name']}" for item in checks if item["status"] != "pass"
     ]
     if failed_checks:
         return _blocked_cycle(
             cycle, failed_checks, contract["artifact"], review, [], checks=checks
-        )
-
-    if review["hard_failures"]:
-        return _blocked_cycle(
-            cycle, review["hard_failures"], contract["artifact"], review, [], checks=checks
         )
 
     failed = list(validation["quality_feedback"])
@@ -485,14 +521,22 @@ def _atomic_write(path, value):
     handle = tempfile.NamedTemporaryFile(
         "w", encoding="utf-8", dir=path.parent, prefix=path.name + ".", suffix=".tmp", delete=False
     )
+    tmp_name = handle.name
     try:
         json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
         handle.write("\n")
         handle.flush()
         os.fsync(handle.fileno())
-    finally:
+    except BaseException:
         handle.close()
-    os.replace(handle.name, path)
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+    else:
+        handle.close()
+    os.replace(tmp_name, path)
 
 
 def _load_json(path, default):
@@ -508,25 +552,137 @@ def _journal_dir(contract, root):
     if not contract["persistence_dir"]:
         return None
     root = Path(root).resolve()
+    parts = list(Path(contract["persistence_dir"]).parts) + [contract["run_id"]]
     current = root
-    for part in Path(contract["persistence_dir"]).parts:
+    for part in parts:
         current = current / part
         if current.is_symlink():
             raise ValueError("journal directory must not contain symlinks")
-    return (root / contract["persistence_dir"]).resolve()
+    journal = current.resolve()
+    try:
+        journal.relative_to(root)
+    except ValueError:
+        raise ValueError("journal directory escapes the workspace")
+    return journal
 
 
-def _cycle_events_ok(events, cycle):
+def _validate_state(state, contract):
+    if not isinstance(state, dict):
+        raise ValueError("journal state must be an object")
+    if state.get("status") not in ("approved", "blocked"):
+        raise ValueError("journal state has an invalid status")
+    cycle_count = state.get("cycle_count")
+    if not _is_int(cycle_count) or not 1 <= cycle_count <= contract["max_cycles"]:
+        raise ValueError("journal state has an invalid cycle_count")
+    if state.get("last_artifact") != contract["artifact"]:
+        raise ValueError("journal state artifact does not match the contract")
+    if state.get("status") == "approved" and state.get("human_signoff") != "pending":
+        raise ValueError("approved journal state must be pending human signoff")
+
+
+def _check_cycle_events(events, cycle):
     start = 3 * (cycle - 1)
-    expected = ["cycle-start", "deterministic-checks", "review"]
     names = [
         entry.get("event") if isinstance(entry, dict) else None
         for entry in events[start : start + 3]
     ]
-    return names == expected
+    if names != ["cycle-start", "deterministic-checks", "review"]:
+        raise ValueError("journal events are incomplete")
+    for entry in events[start : start + 3]:
+        if entry.get("cycle") != cycle:
+            raise ValueError("journal events are incomplete")
 
 
-def record_cycle(review, *, contract, cycle, workspace_root=None):
+def _check_preflight_events(events, cycle):
+    start = 3 * (cycle - 1)
+    names = [
+        entry.get("event") if isinstance(entry, dict) else None
+        for entry in events[start : start + 2]
+    ]
+    if names != ["cycle-start", "deterministic-checks"]:
+        raise ValueError("journal events are incomplete")
+    for entry in events[start : start + 2]:
+        if entry.get("cycle") != cycle:
+            raise ValueError("journal events are incomplete")
+
+
+def _validate_journal(directory, contract):
+    """Valida o diário e devolve (cycles, events, state).
+
+    `cycles` é a lista de payloads dos arquivos `cycle-NN.json` em ordem (índice = posição + 1);
+    `events` é a lista de eventos; `state` é o estado terminal validado, ou `None`.
+    """
+    if directory is None:
+        return [], [], None
+    if not directory.exists():
+        return [], [], None
+    if not directory.is_dir():
+        raise ValueError("journal path is not a directory")
+    if any(entry.is_symlink() for entry in directory.iterdir()):
+        raise ValueError("journal directory must not contain symlinks")
+
+    files = sorted(directory.glob("cycle-*.json"))
+    expected = [f"cycle-{index:02d}.json" for index in range(1, len(files) + 1)]
+    if [path.name for path in files] != expected:
+        raise ValueError("journal cycle files are out of sequence")
+
+    events = _load_json(directory / "events.json", None)
+    if events is None:
+        events = []
+    if not isinstance(events, list):
+        raise ValueError("journal events are not a list")
+
+    state = None
+    state_path = directory / "state.json"
+    if state_path.exists():
+        if state_path.is_symlink() or not state_path.is_file():
+            raise ValueError("journal state must be a regular file")
+        state = _load_json(state_path, None)
+        _validate_state(state, contract)
+
+    n = len(files)
+    total = len(events)
+    preflight = False
+    if total == 3 * n:
+        pass
+    elif total == 3 * n + 2:
+        preflight = True
+    else:
+        raise ValueError("journal events are incomplete")
+
+    cycles = []
+    for index, path in enumerate(files, start=1):
+        payload = _load_json(path, None)
+        expected_key = [contract["run_id"], contract["artifact"], index]
+        if not isinstance(payload, dict) or payload.get("idempotency_key") != expected_key:
+            raise ValueError("journal cycle does not match the contract")
+        _check_cycle_events(events, index)
+        review = payload.get("review")
+        if not validate_review(review, contract)["valid"]:
+            raise ValueError("journal contains an invalid review")
+        cycles.append(payload)
+
+    if preflight:
+        _check_preflight_events(events, n + 1)
+        if state is None or state.get("status") != "blocked":
+            raise ValueError("preflight journal must be blocked")
+    return cycles, events, state
+
+
+def _stored_checks(events, index):
+    start = 3 * (index - 1)
+    entry = events[start + 1]
+    results = entry.get("results") if isinstance(entry, dict) else None
+    return results if isinstance(results, list) else []
+
+
+def _persistence_blocked(cycle, contract, review, error, checks=None):
+    return _blocked_cycle(
+        cycle, [f"persistence failed: {error}"], contract["artifact"], review, [], checks=checks
+    )
+
+
+def record_cycle(review, *, contract, cycle, workspace_root=None, checks=None):
     root = Path.cwd().resolve() if workspace_root is None else Path(workspace_root).resolve()
     validated = validate_contract(contract)
     if not validated["valid"]:
@@ -535,9 +691,13 @@ def record_cycle(review, *, contract, cycle, workspace_root=None):
     if not _is_int(cycle) or not 1 <= cycle <= contract["max_cycles"]:
         raise ValueError("cycle must be an integer within max_cycles")
 
-    directory = _journal_dir(contract, root)
+    try:
+        directory = _journal_dir(contract, root)
+    except OSError as error:
+        return _persistence_blocked(cycle, contract, review, error, checks)
+
     if directory is None:
-        return evaluate_cycle(review, contract=contract, cycle=cycle, workspace_root=root)
+        return evaluate_cycle(review, contract=contract, cycle=cycle, workspace_root=root, checks=checks)
 
     payload = {
         "idempotency_key": [contract["run_id"], contract["artifact"], cycle],
@@ -545,69 +705,53 @@ def record_cycle(review, *, contract, cycle, workspace_root=None):
     }
     path = directory / f"cycle-{cycle:02d}.json"
 
-    if directory.exists() and (
-        not directory.is_dir() or any(item.is_symlink() for item in directory.iterdir())
-    ):
-        raise ValueError("invalid journal directory")
+    try:
+        cycles, events, state = _validate_journal(directory, contract)
 
-    events = _load_json(directory / "events.json", [])
-    if not isinstance(events, list):
-        raise ValueError("journal events are not a list")
+        if cycle <= len(cycles):
+            existing = cycles[cycle - 1]
+            if existing.get("review") != payload["review"]:
+                raise ValueError("cycle already recorded with different content")
+            if state is not None:
+                return state
+            return evaluate_cycle(review, contract=contract, cycle=cycle, workspace_root=root, checks=checks)
 
-    if path.exists():
-        existing = _load_json(path, None)
-        if (
-            isinstance(existing, dict)
-            and existing.get("idempotency_key") == payload["idempotency_key"]
-            and existing.get("review") == payload["review"]
-        ):
-            if len(events) != 3 * cycle or not _cycle_events_ok(events, cycle):
-                raise ValueError("journal history is incomplete")
-            stored = _load_json(directory / "state.json", None)
-            if stored:
-                return stored
-            return evaluate_cycle(review, contract=contract, cycle=cycle, workspace_root=root)
-        raise ValueError("cycle already recorded with different content")
+        if cycle != len(cycles) + 1:
+            raise ValueError("journal history is incomplete")
+        if state is not None:
+            raise ValueError("journal already terminal")
 
-    if directory.exists() and (directory / "state.json").exists():
-        raise ValueError("journal already terminal")
-
-    cycles = sorted(directory.glob("cycle-*.json")) if directory.exists() else []
-    if len(cycles) != cycle - 1 or len(events) != 3 * (cycle - 1):
-        raise ValueError("journal history is incomplete")
-
-    result = evaluate_cycle(review, contract=contract, cycle=cycle, workspace_root=root)
-    _atomic_write(path, payload)
-    events.extend(
-        [
-            {"cycle": cycle, "event": "cycle-start", "artifact": contract["artifact"]},
-            {
-                "cycle": cycle,
-                "event": "deterministic-checks",
-                "results": deepcopy(result.get("checks", [])),
-            },
-            {"cycle": cycle, "event": "review", "review": deepcopy(review)},
-        ]
-    )
-    _atomic_write(directory / "events.json", events)
-    if result["status"] != "retry":
-        _atomic_write(directory / "state.json", result)
+        result = evaluate_cycle(review, contract=contract, cycle=cycle, workspace_root=root, checks=checks)
+        events.extend(
+            [
+                {"cycle": cycle, "event": "cycle-start", "artifact": contract["artifact"]},
+                {
+                    "cycle": cycle,
+                    "event": "deterministic-checks",
+                    "results": deepcopy(result.get("checks", [])),
+                },
+                {"cycle": cycle, "event": "review", "review": deepcopy(review)},
+            ]
+        )
+        _atomic_write(path, payload)
+        _atomic_write(directory / "events.json", events)
+        if result["status"] != "retry":
+            _atomic_write(directory / "state.json", result)
+    except (OSError, TypeError) as error:
+        return _persistence_blocked(cycle, contract, review, error, checks)
     return result
 
 
 def _persist_preflight(directory, contract, cycle, result):
     if directory is None:
-        return
-    if directory.exists():
-        if not directory.is_dir() or any(item.is_symlink() for item in directory.iterdir()):
-            raise ValueError("invalid journal directory")
-        if (directory / "state.json").exists():
-            raise ValueError("journal already terminal")
-    cycles = sorted(directory.glob("cycle-*.json")) if directory.exists() else []
-    events = _load_json(directory / "events.json", [])
-    if not isinstance(events, list):
-        raise ValueError("journal events are not a list")
-    if len(cycles) != cycle - 1 or len(events) != 3 * (cycle - 1):
+        return result
+    try:
+        cycles, events, state = _validate_journal(directory, contract)
+    except OSError as error:
+        return _persistence_blocked(cycle, contract, {}, error, result.get("checks"))
+    if state is not None:
+        raise ValueError("journal already terminal")
+    if cycle != len(cycles) + 1:
         raise ValueError("journal history is incomplete")
     events.extend(
         [
@@ -619,39 +763,29 @@ def _persist_preflight(directory, contract, cycle, result):
             },
         ]
     )
-    _atomic_write(directory / "events.json", events)
-    _atomic_write(directory / "state.json", result)
+    try:
+        _atomic_write(directory / "events.json", events)
+        _atomic_write(directory / "state.json", result)
+    except (OSError, TypeError) as error:
+        return _persistence_blocked(cycle, contract, {}, error, result.get("checks"))
+    return result
 
 
-def _resume(directory, contract, root):
-    if not directory.exists():
-        return 1, []
-    if not directory.is_dir() or any(item.is_symlink() for item in directory.iterdir()):
-        raise ValueError("invalid journal directory")
-    files = sorted(directory.glob("cycle-*.json"))
-    expected_names = [f"cycle-{index:02d}.json" for index in range(1, len(files) + 1)]
-    if [path.name for path in files] != expected_names:
-        raise ValueError("journal cycle files are out of sequence")
-    events = _load_json(directory / "events.json", [])
-    if not isinstance(events, list):
-        raise ValueError("journal events are not a list")
-    if len(events) != 3 * len(files):
-        raise ValueError("journal events are incomplete")
+def _resume(cycles, events, contract, root):
     feedback = []
-    for index, path in enumerate(files, start=1):
-        payload = _load_json(path, None)
-        expected = [contract["run_id"], contract["artifact"], index]
-        if not isinstance(payload, dict) or payload.get("idempotency_key") != expected:
-            raise ValueError("journal cycle does not match the contract")
-        if not _cycle_events_ok(events, index):
-            raise ValueError("journal events are incomplete")
+    for index, payload in enumerate(cycles, start=1):
+        checks = _stored_checks(events, index)
         result = evaluate_cycle(
-            payload.get("review"), contract=contract, cycle=index, workspace_root=root
+            payload.get("review"),
+            contract=contract,
+            cycle=index,
+            workspace_root=root,
+            checks=checks,
         )
         if result["status"] != "retry":
-            raise ValueError("journal contains a terminal cycle")
+            raise ValueError("journal does not reproduce the stored cycle outcome")
         feedback = deepcopy(result["feedback"])
-    return len(files) + 1, feedback
+    return len(cycles) + 1, feedback
 
 
 def run_gauntlet(executor, reviewer, contract, workspace_root=None):
@@ -668,10 +802,15 @@ def run_gauntlet(executor, reviewer, contract, workspace_root=None):
     root = Path.cwd().resolve() if workspace_root is None else Path(workspace_root).resolve()
     directory = _journal_dir(contract, root)
 
-    if directory is not None and (directory / "state.json").exists():
-        return _load_json(directory / "state.json", None)
+    if directory is None:
+        cycles, events, state = [], [], None
+    else:
+        cycles, events, state = _validate_journal(directory, contract)
 
-    next_cycle, feedback = (1, []) if directory is None else _resume(directory, contract, root)
+    if state is not None:
+        return state
+
+    next_cycle, feedback = _resume(cycles, events, contract, root)
 
     while next_cycle <= contract["max_cycles"]:
         executor(deepcopy(feedback))
@@ -689,10 +828,9 @@ def run_gauntlet(executor, reviewer, contract, workspace_root=None):
                 [],
                 checks=checks,
             )
-            _persist_preflight(directory, contract, next_cycle, result)
-            return result
+            return _persist_preflight(directory, contract, next_cycle, result)
         review = reviewer(contract["artifact"], deepcopy(feedback))
-        result = record_cycle(review, contract=contract, cycle=next_cycle, workspace_root=root)
+        result = record_cycle(review, contract=contract, cycle=next_cycle, workspace_root=root, checks=checks)
         if result["status"] != "retry":
             return result
         feedback = deepcopy(result["feedback"])

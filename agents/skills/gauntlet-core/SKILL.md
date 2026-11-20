@@ -87,6 +87,13 @@ Com Python disponível, use o motor:
 No motor, os checks determinísticos rodam antes do revisor. O callback `revisor` recebe apenas
 `artifact` e `feedback`; o contrato chega por closure ou por caminho declarado.
 
+Valide o contrato com `load_contract` antes do ciclo 1: contrato inválido é reportado como
+`blocked` (ciclo 0), nunca como execução.
+
+O diário (`cycle-NN.json`, `events.json`, `state.json`) é gravado sob
+`<persistence_dir>/<run_id>/`; um `run_id` novo grava um diário novo e pode rodar de novo o
+mesmo `persistence_dir`.
+
 Sem Python, conduza os ciclos manualmente com as mesmas regras e marque o resultado com
 `"verified_by": "agent"` em vez de `"motor"`.
 

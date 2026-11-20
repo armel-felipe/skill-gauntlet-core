@@ -49,7 +49,7 @@ def test_writes_cycle_events_and_state(tmp_path):
     root = workspace(tmp_path)
     result = record_cycle(review(), contract=contract(), cycle=1, workspace_root=root)
     assert result["status"] == "approved"
-    directory = root / "runs" / "teste"
+    directory = root / "runs" / "teste" / "run-1"
     assert json.loads((directory / "cycle-01.json").read_text())["idempotency_key"] == [
         "run-1",
         "out/artefato.md",
@@ -75,9 +75,9 @@ def test_no_journal_without_persistence_dir(tmp_path):
 def test_repeating_same_cycle_is_noop(tmp_path):
     root = workspace(tmp_path)
     record_cycle(review(), contract=contract(), cycle=1, workspace_root=root)
-    first = (root / "runs" / "teste" / "cycle-01.json").read_text()
+    first = (root / "runs" / "teste" / "run-1" / "cycle-01.json").read_text()
     record_cycle(review(), contract=contract(), cycle=1, workspace_root=root)
-    assert (root / "runs" / "teste" / "cycle-01.json").read_text() == first
+    assert (root / "runs" / "teste" / "run-1" / "cycle-01.json").read_text() == first
 
 
 def test_same_cycle_different_content_is_error(tmp_path):
@@ -102,7 +102,7 @@ def test_rejects_gap_in_history(tmp_path):
 
 def test_rejects_symlink_in_journal(tmp_path):
     root = workspace(tmp_path)
-    directory = root / "runs" / "teste"
+    directory = root / "runs" / "teste" / "run-1"
     directory.mkdir(parents=True)
     (directory / "state.json").symlink_to(root / "out" / "artefato.md")
     with pytest.raises(ValueError):
@@ -112,7 +112,7 @@ def test_rejects_symlink_in_journal(tmp_path):
 def test_rejects_symlinked_cycle_file(tmp_path):
     root = workspace(tmp_path)
     record_cycle(review(), contract=contract(), cycle=1, workspace_root=root)
-    directory = root / "runs" / "teste"
+    directory = root / "runs" / "teste" / "run-1"
     stored = directory / "cycle-01.json"
     outside = root / "outside.json"
     outside.write_text(stored.read_text(encoding="utf-8"), encoding="utf-8")
@@ -134,7 +134,7 @@ def test_rejects_symlinked_persistence_dir(tmp_path):
 
 def test_rejects_non_list_events(tmp_path):
     root = workspace(tmp_path)
-    directory = root / "runs" / "teste"
+    directory = root / "runs" / "teste" / "run-1"
     directory.mkdir(parents=True)
     (directory / "events.json").write_text("{}", encoding="utf-8")
     with pytest.raises(ValueError, match="not a list"):
@@ -144,6 +144,24 @@ def test_rejects_non_list_events(tmp_path):
 def test_fast_path_requires_events(tmp_path):
     root = workspace(tmp_path)
     record_cycle(review(), contract=contract(), cycle=1, workspace_root=root)
-    (root / "runs" / "teste" / "events.json").unlink()
+    (root / "runs" / "teste" / "run-1" / "events.json").unlink()
     with pytest.raises(ValueError, match="incomplete"):
+        record_cycle(review(), contract=contract(), cycle=1, workspace_root=root)
+
+
+def test_persistence_failure_returns_blocked(tmp_path):
+    root = workspace(tmp_path)
+    (root / "runs").write_text("nao e diretorio", encoding="utf-8")
+    result = record_cycle(review(), contract=contract(), cycle=1, workspace_root=root)
+    assert result["status"] == "blocked"
+    assert result["failure_reasons"][0].startswith("persistence failed")
+
+
+def test_rejects_forged_cycle_file(tmp_path):
+    root = workspace(tmp_path)
+    directory = root / "runs" / "teste" / "run-1"
+    directory.mkdir(parents=True)
+    (directory / "cycle-99.json").write_text("{}", encoding="utf-8")
+    (directory / "events.json").write_text(json.dumps([{}, {}, {}]), encoding="utf-8")
+    with pytest.raises(ValueError):
         record_cycle(review(), contract=contract(), cycle=1, workspace_root=root)

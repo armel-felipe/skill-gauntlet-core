@@ -97,6 +97,28 @@ def test_rejects_windows_style_artifact_escape(artifact):
     assert validate_contract(base_contract(artifact=artifact))["valid"] is False
 
 
+@pytest.mark.parametrize("artifact", ["D:artifact.md", "\\artifact.md"])
+def test_rejects_drive_relative_and_rooted_artifact(artifact):
+    assert validate_contract(base_contract(artifact=artifact))["valid"] is False
+
+
+@pytest.mark.parametrize("persistence_dir", ["D:runs", "\\runs"])
+def test_rejects_drive_relative_and_rooted_persistence_dir(persistence_dir):
+    assert validate_contract(base_contract(persistence_dir=persistence_dir))["valid"] is False
+
+
+@pytest.mark.parametrize("run_id", ["a/b", "a\\b", ".", "..", "D:run", "\\run"])
+def test_rejects_unsafe_run_id(run_id):
+    assert validate_contract(base_contract(run_id=run_id))["valid"] is False
+
+
+def test_rejects_criterion_name_with_whitespace():
+    contract = base_contract(
+        criteria=[{"name": " clareza ", "description": "legivel", "gate": 9}]
+    )
+    assert validate_contract(contract)["valid"] is False
+
+
 def test_rejects_unknown_criterion_field():
     contract = base_contract(
         criteria=[{"name": "clareza", "description": "legivel", "extra": 1}]

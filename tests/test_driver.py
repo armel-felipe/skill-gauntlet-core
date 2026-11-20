@@ -123,7 +123,7 @@ def test_resumes_from_retry_cycle(tmp_path):
 
 def test_rejects_inconsistent_journal(tmp_path):
     root = workspace(tmp_path)
-    directory = root / "runs" / "teste"
+    directory = root / "runs" / "teste" / "run-1"
     directory.mkdir(parents=True)
     (directory / "cycle-01.json").write_text("{}", encoding="utf-8")
     with pytest.raises(ValueError):
@@ -138,7 +138,7 @@ def test_raises_on_invalid_contract():
 
 def test_rejects_cycle_file_out_of_sequence(tmp_path):
     root = workspace(tmp_path)
-    directory = root / "runs" / "teste"
+    directory = root / "runs" / "teste" / "run-1"
     directory.mkdir(parents=True)
     (directory / "cycle-03.json").write_text(
         json.dumps(
@@ -166,7 +166,7 @@ def test_rejects_cycle_file_out_of_sequence(tmp_path):
 
 def test_rejects_wrong_event_events(tmp_path):
     root = workspace(tmp_path)
-    directory = root / "runs" / "teste"
+    directory = root / "runs" / "teste" / "run-1"
     directory.mkdir(parents=True)
     (directory / "cycle-01.json").write_text(
         json.dumps(
@@ -209,7 +209,7 @@ def test_checks_run_before_reviewer(tmp_path):
     )
     assert result["status"] == "blocked"
     assert result["failure_reasons"] == ["check failed: ruim"]
-    state = json.loads((root / "runs" / "teste" / "state.json").read_text(encoding="utf-8"))
+    state = json.loads((root / "runs" / "teste" / "run-1" / "state.json").read_text(encoding="utf-8"))
     assert state["status"] == "blocked"
 
 
@@ -225,5 +225,81 @@ def test_missing_artifact_blocks_before_reviewer(tmp_path):
     result = run_gauntlet(executor, reviewer, contract(), workspace_root=root)
     assert result["status"] == "blocked"
     assert "artifact does not exist" in result["failure_reasons"]
-    state = json.loads((root / "runs" / "teste" / "state.json").read_text(encoding="utf-8"))
+    state = json.loads((root / "runs" / "teste" / "run-1" / "state.json").read_text(encoding="utf-8"))
     assert state["status"] == "blocked"
+
+
+def test_new_run_id_executes_again(tmp_path):
+    root = workspace(tmp_path)
+    calls = {"executor": 0}
+
+    def executor(feedback):
+        calls["executor"] += 1
+        (root / "out" / "artefato.md").write_text("conteudo", encoding="utf-8")
+
+    def reviewer(artifact, feedback):
+        return approved_review()
+
+    first = run_gauntlet(executor, reviewer, contract(), workspace_root=root)
+    assert first["status"] == "approved"
+    assert calls["executor"] == 1
+
+    second = run_gauntlet(executor, reviewer, contract(run_id="run-2"), workspace_root=root)
+    assert second["status"] == "approved"
+    assert calls["executor"] == 2
+    assert (root / "runs" / "teste" / "run-2" / "state.json").exists()
+
+
+def test_checks_run_exactly_once_per_cycle(tmp_path):
+    root = workspace(tmp_path)
+    counter = root / "counter.txt"
+
+    def executor(feedback):
+        (root / "out" / "artefato.md").write_text("conteudo", encoding="utf-8")
+
+    def reviewer(artifact, feedback):
+        return approved_review()
+
+    check = {"name": "conta", "run": "echo x >> counter.txt"}
+    result = run_gauntlet(executor, reviewer, contract(checks=[check]), workspace_root=root)
+    assert result["status"] == "approved"
+    assert len(counter.read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_preflight_journal_shape(tmp_path):
+    root = workspace(tmp_path)
+
+    def executor(feedback):
+        pass
+
+    def reviewer(artifact, feedback):
+        raise AssertionError("revisor nao deveria rodar")
+
+    result = run_gauntlet(executor, reviewer, contract(), workspace_root=root)
+    assert result["status"] == "blocked"
+    directory = root / "runs" / "teste" / "run-1"
+    events = json.loads((directory / "events.json").read_text(encoding="utf-8"))
+    assert len(events) == 2
+    assert not (directory / "cycle-01.json").exists()
+    state = json.loads((directory / "state.json").read_text(encoding="utf-8"))
+    assert state["status"] == "blocked"
+
+
+def test_terminal_fast_path_rejects_symlinked_state(tmp_path):
+    root = workspace(tmp_path)
+
+    def executor(feedback):
+        (root / "out" / "artefato.md").write_text("conteudo", encoding="utf-8")
+
+    def reviewer(artifact, feedback):
+        return approved_review()
+
+    run_gauntlet(executor, reviewer, contract(), workspace_root=root)
+    directory = root / "runs" / "teste" / "run-1"
+    stored = directory / "state.json"
+    outside = root / "forged.json"
+    outside.write_text(stored.read_text(encoding="utf-8"), encoding="utf-8")
+    stored.unlink()
+    stored.symlink_to(outside)
+    with pytest.raises(ValueError):
+        run_gauntlet(executor, reviewer, contract(), workspace_root=root)

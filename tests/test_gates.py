@@ -74,6 +74,17 @@ def test_blocks_on_hard_failure(tmp_path):
     assert result["status"] == "blocked"
 
 
+def test_hard_failure_wins_over_missing_artifact(tmp_path):
+    result = evaluate_cycle(
+        review(hard_failures=["fonte inventada"]),
+        contract=contract(),
+        cycle=1,
+        workspace_root=tmp_path,
+    )
+    assert result["status"] == "blocked"
+    assert result["failure_reasons"] == ["fonte inventada"]
+
+
 def test_retries_on_failed_criterion_with_fix(tmp_path):
     result = evaluate_cycle(
         review(

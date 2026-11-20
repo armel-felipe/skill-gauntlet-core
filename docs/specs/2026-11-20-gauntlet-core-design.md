@@ -89,7 +89,10 @@ Campos obrigatórios: `name`, `goal`, `artifact`, `criteria`. Opcionais: `covera
 - `checks` é lista; cada item tem `name` e `run` (string não vazia), com `timeout_s` opcional
   inteiro de 1 a 600 (ausente = 60).
 - `persistence_dir` é relativo ao workspace; ausente = nenhuma escrita em disco.
-- `run_id` é string não vazia; ausente = `run`.
+- `run_id` é string não vazia, um único componente de caminho seguro (não `..`, sem `/` ou `\`,
+  sem drive); ausente = `run`.
+- `artifact` e `persistence_dir` não podem ser drive-relative nem rooted (ex.: `D:artifact.md`,
+  `\artifact.md`).
 - Qualquer campo desconhecido no contrato ou nos critérios é erro estrutural. Nada é ignorado.
 
 ## Review
@@ -147,6 +150,9 @@ Avaliados nesta ordem; o primeiro que dispara decide.
 Critério `blocking: false` nunca bloqueia nem gera retry; entra no review e no feedback como
 diagnóstico.
 
+O agente deve validar o contrato antes do ciclo 1; contrato inválido é reportado como
+`blocked` (ciclo 0), nunca como execução.
+
 ## Máquina de estados
 
 ```
@@ -198,20 +204,26 @@ para o humano; declara pronta para QA.
 
 ## Persistência
 
-Quando `persistence_dir` existe no contrato:
+Quando `persistence_dir` existe no contrato, o diário é namespaceado por `run_id`:
 
 ```
-<persistence_dir>/
+<root>/<persistence_dir>/<run_id>/
 ├── cycle-01.json … cycle-05.json
 ├── events.json
 └── state.json
 ```
+
+Um `run_id` novo grava um diário novo sob o mesmo `persistence_dir`; aprovado nunca é
+re-executado no mesmo `run_id`.
 
 - Escrita atômica (tmp no mesmo diretório + `os.replace`).
 - Chave de idempotência: `(run_id, artifact, cycle)`. Repetir o mesmo ciclo com o mesmo conteúdo
   é no-op; com conteúdo diferente é erro.
 - `events.json` registra, por ciclo, `cycle-start`, `deterministic-checks` e `review`, nessa ordem.
 - `state.json` só é escrito no terminal, e uma vez. Diário já terminal rejeita novo ciclo.
+- Bloqueio de preflight (artefato ausente ou check falhando antes do revisor) é terminal e não tem
+  revisor: o último ciclo registra só dois eventos (`cycle-start`, `deterministic-checks`), sem
+  `cycle-NN.json`, e um `state.json` `blocked`.
 - Retomada só é permitida com journal íntegro de `cycle-01` até `cycle-(N-1)`: exatamente
   `N-1` reviews e `3 × (N-1)` eventos. Qualquer lacuna, review inválido ou symlink no diretório
   é erro, nunca reconstrução.
