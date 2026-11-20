@@ -201,7 +201,7 @@ def validate_review(review, contract):
         errors.append(f"missing review fields: {sorted(missing)}")
 
     decision = review.get("decision")
-    if decision not in DECISIONS:
+    if not isinstance(decision, str) or decision not in DECISIONS:
         errors.append("decision must be approved or feedback")
 
     coverage = review.get("coverage")
@@ -237,16 +237,20 @@ def validate_review(review, contract):
         unknown = set(item) - FEEDBACK_KEYS
         if unknown:
             errors.append(f"{prefix} has unknown fields: {sorted(unknown)}")
-        if item.get("criterion") not in gates:
+        criterion_name = item.get("criterion")
+        if not isinstance(criterion_name, str) or criterion_name not in gates:
             errors.append(f"{prefix}.criterion must be one of the contract criteria")
-        if item.get("kind", "required_fix") not in KINDS:
+        kind = item.get("kind", "required_fix")
+        if not isinstance(kind, str) or kind not in KINDS:
             errors.append(f"{prefix}.kind must be required_fix or optional_suggestion")
         fix = item.get("fix")
         if not isinstance(fix, str) or not fix.strip():
             errors.append(f"{prefix}.fix must be a non-empty string")
 
     gaps = review.get("coverage_gaps", [])
-    if not isinstance(gaps, list) or not all(gap in gates for gap in gaps):
+    if not isinstance(gaps, list) or not all(
+        isinstance(gap, str) and gap in gates for gap in gaps
+    ):
         errors.append("coverage_gaps must be a list of contract criteria")
 
     artifact = review.get("artifact")

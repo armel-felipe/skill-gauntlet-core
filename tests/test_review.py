@@ -109,3 +109,32 @@ def test_lists_blocking_and_advisory_failures():
     assert result["quality_feedback"] == ["clareza"]
     assert result["advisory"] == ["ritmo"]
     assert result["gate_passed"] is False
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"decision": []},
+        {"feedback": [{"criterion": [], "fix": "x"}]},
+        {"feedback": [{"criterion": "clareza", "kind": {}, "fix": "x"}]},
+        {"coverage_gaps": [{}]},
+    ],
+)
+def test_rejects_unhashable_values_without_raising(overrides):
+    result = validate_review(base_review(**overrides), contract())
+    assert result["valid"] is False
+
+
+def test_accepts_coverage_gaps_with_contract_criteria():
+    result = validate_review(base_review(coverage_gaps=["ritmo"]), contract())
+    assert result["valid"] is True
+
+
+def test_rejects_coverage_gaps_with_unknown_criterion():
+    result = validate_review(base_review(coverage_gaps=["inexistente"]), contract())
+    assert result["valid"] is False
+
+
+def test_rejects_hard_failures_with_wrong_type():
+    result = validate_review(base_review(hard_failures="falhou"), contract())
+    assert result["valid"] is False
