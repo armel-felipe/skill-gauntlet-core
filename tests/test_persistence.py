@@ -120,3 +120,30 @@ def test_rejects_symlinked_cycle_file(tmp_path):
     stored.symlink_to(outside)
     with pytest.raises(ValueError):
         record_cycle(review(), contract=contract(), cycle=1, workspace_root=root)
+
+
+def test_rejects_symlinked_persistence_dir(tmp_path):
+    root = workspace(tmp_path)
+    real = tmp_path / "real-journal"
+    real.mkdir()
+    (tmp_path / "runs").mkdir()
+    (tmp_path / "runs" / "teste").symlink_to(real)
+    with pytest.raises(ValueError, match="symlink"):
+        record_cycle(review(), contract=contract(), cycle=1, workspace_root=root)
+
+
+def test_rejects_non_list_events(tmp_path):
+    root = workspace(tmp_path)
+    directory = root / "runs" / "teste"
+    directory.mkdir(parents=True)
+    (directory / "events.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="not a list"):
+        record_cycle(review(), contract=contract(), cycle=1, workspace_root=root)
+
+
+def test_fast_path_requires_events(tmp_path):
+    root = workspace(tmp_path)
+    record_cycle(review(), contract=contract(), cycle=1, workspace_root=root)
+    (root / "runs" / "teste" / "events.json").unlink()
+    with pytest.raises(ValueError, match="incomplete"):
+        record_cycle(review(), contract=contract(), cycle=1, workspace_root=root)

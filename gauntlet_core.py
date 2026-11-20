@@ -507,7 +507,23 @@ def _load_json(path, default):
 def _journal_dir(contract, root):
     if not contract["persistence_dir"]:
         return None
+    root = Path(root).resolve()
+    current = root
+    for part in Path(contract["persistence_dir"]).parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError("journal directory must not contain symlinks")
     return (root / contract["persistence_dir"]).resolve()
+
+
+def _cycle_events_ok(events, cycle):
+    start = 3 * (cycle - 1)
+    expected = ["cycle-start", "deterministic-checks", "review"]
+    names = [
+        entry.get("event") if isinstance(entry, dict) else None
+        for entry in events[start : start + 3]
+    ]
+    return names == expected
 
 
 def record_cycle(review, *, contract, cycle, workspace_root=None):
@@ -516,11 +532,12 @@ def record_cycle(review, *, contract, cycle, workspace_root=None):
     if not validated["valid"]:
         raise ValueError("contract is invalid: " + "; ".join(validated["errors"]))
     contract = validated["contract"]
-    result = evaluate_cycle(review, contract=contract, cycle=cycle, workspace_root=root)
+    if not _is_int(cycle) or not 1 <= cycle <= contract["max_cycles"]:
+        raise ValueError("cycle must be an integer within max_cycles")
 
     directory = _journal_dir(contract, root)
     if directory is None:
-        return result
+        return evaluate_cycle(review, contract=contract, cycle=cycle, workspace_root=root)
 
     payload = {
         "idempotency_key": [contract["run_id"], contract["artifact"], cycle],
@@ -533,6 +550,10 @@ def record_cycle(review, *, contract, cycle, workspace_root=None):
     ):
         raise ValueError("invalid journal directory")
 
+    events = _load_json(directory / "events.json", [])
+    if not isinstance(events, list):
+        raise ValueError("journal events are not a list")
+
     if path.exists():
         existing = _load_json(path, None)
         if (
@@ -540,18 +561,22 @@ def record_cycle(review, *, contract, cycle, workspace_root=None):
             and existing.get("idempotency_key") == payload["idempotency_key"]
             and existing.get("review") == payload["review"]
         ):
-            return _load_json(directory / "state.json", None) or result
+            if len(events) != 3 * cycle or not _cycle_events_ok(events, cycle):
+                raise ValueError("journal history is incomplete")
+            stored = _load_json(directory / "state.json", None)
+            if stored:
+                return stored
+            return evaluate_cycle(review, contract=contract, cycle=cycle, workspace_root=root)
         raise ValueError("cycle already recorded with different content")
 
-    if directory.exists():
-        if (directory / "state.json").exists():
-            raise ValueError("journal already terminal")
+    if directory.exists() and (directory / "state.json").exists():
+        raise ValueError("journal already terminal")
 
     cycles = sorted(directory.glob("cycle-*.json")) if directory.exists() else []
-    events = _load_json(directory / "events.json", [])
     if len(cycles) != cycle - 1 or len(events) != 3 * (cycle - 1):
         raise ValueError("journal history is incomplete")
 
+    result = evaluate_cycle(review, contract=contract, cycle=cycle, workspace_root=root)
     _atomic_write(path, payload)
     events.extend(
         [
