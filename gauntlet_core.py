@@ -348,3 +348,130 @@ def run_checks(contract, workspace_root=None):
             }
         )
     return results
+
+
+def _blocked_cycle(cycle, reasons, artifact, review, failed_criteria, checks=None):
+    feedback = review.get("feedback", []) if isinstance(review, dict) else []
+    return {
+        "status": "blocked",
+        "cycle_count": cycle,
+        "failure_reasons": list(reasons),
+        "failed_criteria": sorted(failed_criteria),
+        "last_artifact": artifact,
+        "last_review": deepcopy(review),
+        "feedback": deepcopy(feedback),
+        "checks": checks or [],
+    }
+
+
+def evaluate_cycle(review, *, contract, cycle, workspace_root=None):
+    root = Path.cwd().resolve() if workspace_root is None else Path(workspace_root).resolve()
+    if not _is_int(cycle) or not 1 <= cycle <= contract["max_cycles"]:
+        raise ValueError("cycle must be an integer within max_cycles")
+
+    validation = validate_review(review, contract)
+    if not validation["valid"]:
+        return _blocked_cycle(cycle, validation["errors"], contract["artifact"], review, [])
+
+    artifact_errors = _artifact_errors(root, contract["artifact"])
+    if artifact_errors:
+        return _blocked_cycle(cycle, artifact_errors, contract["artifact"], review, [])
+
+    checks = run_checks(contract, root)
+    failed_checks = [
+        f"check failed: {item['name']}" for item in checks if item["status"] != "pass"
+    ]
+    if failed_checks:
+        return _blocked_cycle(
+            cycle, failed_checks, contract["artifact"], review, [], checks=checks
+        )
+
+    if review["hard_failures"]:
+        return _blocked_cycle(
+            cycle, review["hard_failures"], contract["artifact"], review, [], checks=checks
+        )
+
+    failed = list(validation["quality_feedback"])
+    below_coverage = review["coverage"] < contract["coverage_gate"]
+    if below_coverage:
+        gaps = set(review.get("coverage_gaps", []))
+        matching = [
+            item
+            for item in review["feedback"]
+            if item.get("kind", "required_fix") == "required_fix" and item["criterion"] in gaps
+        ]
+        if not matching:
+            return _blocked_cycle(
+                cycle,
+                ["coverage below gate without required_fix for a declared gap"],
+                contract["artifact"],
+                review,
+                failed,
+                checks=checks,
+            )
+
+    provided = {
+        item["criterion"]
+        for item in review["feedback"]
+        if item.get("kind", "required_fix") == "required_fix"
+    }
+    if not set(failed) <= provided:
+        return _blocked_cycle(
+            cycle,
+            ["required_fix missing for failed criterion"],
+            contract["artifact"],
+            review,
+            failed,
+            checks=checks,
+        )
+
+    actionable = [
+        item for item in review["feedback"] if item.get("kind", "required_fix") == "required_fix"
+    ]
+    if review["decision"] == "feedback" and not actionable:
+        return _blocked_cycle(
+            cycle,
+            ["feedback decision has no required_fix"],
+            contract["artifact"],
+            review,
+            failed,
+            checks=checks,
+        )
+
+    pending = bool(failed) or below_coverage or review["decision"] == "feedback"
+    if pending:
+        if cycle >= contract["max_cycles"]:
+            return _blocked_cycle(
+                cycle, ["quality gates not met"], contract["artifact"], review, failed, checks=checks
+            )
+        return {
+            "status": "retry",
+            "cycle_count": cycle,
+            "feedback": deepcopy(review["feedback"]),
+            "failed_criteria": sorted(failed),
+            "advisory": validation["advisory"],
+            "last_review": deepcopy(review),
+            "checks": checks,
+        }
+
+    try:
+        fingerprint = "sha256:" + sha256((root / contract["artifact"]).read_bytes()).hexdigest()
+    except OSError as error:
+        return _blocked_cycle(
+            cycle,
+            [f"artifact fingerprint failed: {error}"],
+            contract["artifact"],
+            review,
+            failed,
+            checks=checks,
+        )
+    return {
+        "status": "approved",
+        "cycle_count": cycle,
+        "last_artifact": contract["artifact"],
+        "artifact_fingerprint": fingerprint,
+        "human_signoff": "pending",
+        "advisory": validation["advisory"],
+        "last_review": deepcopy(review),
+        "checks": checks,
+    }
