@@ -153,3 +153,26 @@ def test_blocks_at_last_cycle(tmp_path):
 def test_rejects_cycle_out_of_range(tmp_path):
     with pytest.raises(ValueError):
         evaluate_cycle(review(), contract=contract(), cycle=6, workspace_root=workspace(tmp_path))
+
+
+def test_missing_fix_fires_before_coverage_gate(tmp_path):
+    result = evaluate_cycle(
+        review(
+            decision="feedback",
+            criteria={"clareza": 8, "ritmo": 7},
+            coverage=0.9,
+        ),
+        contract=contract(),
+        cycle=1,
+        workspace_root=workspace(tmp_path),
+    )
+    assert result["status"] == "blocked"
+    assert result["failure_reasons"] == ["required_fix missing for failed criterion"]
+
+
+def test_blocked_normalizes_non_list_feedback(tmp_path):
+    result = evaluate_cycle(
+        review(feedback="abc"), contract=contract(), cycle=1, workspace_root=workspace(tmp_path)
+    )
+    assert result["status"] == "blocked"
+    assert result["feedback"] == []

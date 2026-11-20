@@ -351,7 +351,8 @@ def run_checks(contract, workspace_root=None):
 
 
 def _blocked_cycle(cycle, reasons, artifact, review, failed_criteria, checks=None):
-    feedback = review.get("feedback", []) if isinstance(review, dict) else []
+    raw_feedback = review.get("feedback") if isinstance(review, dict) else None
+    feedback = raw_feedback if isinstance(raw_feedback, list) else []
     return {
         "status": "blocked",
         "cycle_count": cycle,
@@ -392,6 +393,21 @@ def evaluate_cycle(review, *, contract, cycle, workspace_root=None):
         )
 
     failed = list(validation["quality_feedback"])
+    provided = {
+        item["criterion"]
+        for item in review["feedback"]
+        if item.get("kind", "required_fix") == "required_fix"
+    }
+    if not set(failed) <= provided:
+        return _blocked_cycle(
+            cycle,
+            ["required_fix missing for failed criterion"],
+            contract["artifact"],
+            review,
+            failed,
+            checks=checks,
+        )
+
     below_coverage = review["coverage"] < contract["coverage_gate"]
     if below_coverage:
         gaps = set(review.get("coverage_gaps", []))
@@ -409,21 +425,6 @@ def evaluate_cycle(review, *, contract, cycle, workspace_root=None):
                 failed,
                 checks=checks,
             )
-
-    provided = {
-        item["criterion"]
-        for item in review["feedback"]
-        if item.get("kind", "required_fix") == "required_fix"
-    }
-    if not set(failed) <= provided:
-        return _blocked_cycle(
-            cycle,
-            ["required_fix missing for failed criterion"],
-            contract["artifact"],
-            review,
-            failed,
-            checks=checks,
-        )
 
     actionable = [
         item for item in review["feedback"] if item.get("kind", "required_fix") == "required_fix"
