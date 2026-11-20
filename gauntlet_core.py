@@ -2,11 +2,10 @@
 
 import json
 import math
-import os
 from copy import deepcopy
 from hashlib import sha256
 from numbers import Real
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 CONTRACT_REQUIRED = {"name", "goal", "artifact", "criteria"}
 CONTRACT_OPTIONAL = {"coverage_gate", "max_cycles", "checks", "persistence_dir", "run_id"}
@@ -32,10 +31,12 @@ def _finite(value):
 def _relative_error(value):
     if not isinstance(value, str) or not value.strip():
         return "must be a non-empty string"
-    if os.path.isabs(value):
-        return "must be relative to the workspace"
-    if ".." in Path(value).parts:
-        return "must not escape the workspace"
+    for flavour in (PurePosixPath, PureWindowsPath):
+        path = flavour(value)
+        if path.is_absolute():
+            return "must be relative to the workspace"
+        if ".." in path.parts:
+            return "must not escape the workspace"
     return None
 
 

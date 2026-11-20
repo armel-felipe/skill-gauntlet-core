@@ -90,3 +90,76 @@ def test_load_contract_raises_on_invalid_json(tmp_path):
     path.write_text("{nao e json", encoding="utf-8")
     with pytest.raises(ValueError, match="not valid JSON"):
         load_contract(path)
+
+
+@pytest.mark.parametrize("artifact", ["C:\\tmp\\artefato.md", "out\\..\\..\\x.md"])
+def test_rejects_windows_style_artifact_escape(artifact):
+    assert validate_contract(base_contract(artifact=artifact))["valid"] is False
+
+
+def test_rejects_unknown_criterion_field():
+    contract = base_contract(
+        criteria=[{"name": "clareza", "description": "legivel", "extra": 1}]
+    )
+    result = validate_contract(contract)
+    assert result["valid"] is False
+    assert any("criteria[0]" in error and "unknown" in error for error in result["errors"])
+
+
+def test_rejects_unknown_check_field():
+    contract = base_contract(checks=[{"name": "ok", "run": "true", "extra": 1}])
+    result = validate_contract(contract)
+    assert result["valid"] is False
+    assert any("checks[0]" in error and "unknown" in error for error in result["errors"])
+
+
+@pytest.mark.parametrize("coverage_gate", [0.4, 1.1, True])
+def test_rejects_invalid_coverage_gate(coverage_gate):
+    assert validate_contract(base_contract(coverage_gate=coverage_gate))["valid"] is False
+
+
+def test_rejects_persistence_dir_traversal():
+    result = validate_contract(base_contract(persistence_dir="../fora"))
+    assert result["valid"] is False
+    assert any("persistence_dir" in error for error in result["errors"])
+
+
+def test_rejects_blank_run_id():
+    assert validate_contract(base_contract(run_id="  "))["valid"] is False
+
+
+def test_normalized_key_sets():
+    contract = base_contract(checks=[{"name": "ok", "run": "true"}])
+    result = validate_contract(contract)
+    assert result["valid"] is True
+    normalized = result["contract"]
+    assert set(normalized) == {
+        "name",
+        "goal",
+        "artifact",
+        "criteria",
+        "coverage_gate",
+        "max_cycles",
+        "checks",
+        "persistence_dir",
+        "run_id",
+    }
+    assert set(normalized["criteria"][0]) == {"name", "description", "gate", "blocking"}
+    assert set(normalized["checks"][0]) == {"name", "run", "timeout_s"}
+
+
+def test_default_gate_is_nine():
+    contract = base_contract(criteria=[{"name": "clareza", "description": "legivel"}])
+    result = validate_contract(contract)
+    assert result["valid"] is True
+    assert result["contract"]["criteria"][0]["gate"] == 9
+
+
+def test_load_contract_rejects_yaml(tmp_path):
+    path = tmp_path / "contrato.yaml"
+    path.write_text(
+        "name: teste\ngoal: gerar algo\nartifact: out/artefato.md\ncriteria:\n  - name: clareza\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="not valid JSON"):
+        load_contract(path)
