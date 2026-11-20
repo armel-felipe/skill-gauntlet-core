@@ -1,0 +1,18 @@
+{
+  "name": "feature-com-testes",
+  "goal": "Implementar a feature pedida sem quebrar a suite existente.",
+  "artifact": "src/feature.py",
+  "criteria": [
+    {"name": "testes_passam", "description": "A suite inteira passa; nenhum teste novo falha.", "gate": 10},
+    {"name": "cobertura_do_caso", "description": "Cada requisito do pedido tem teste correspondente.", "gate": 9},
+    {"name": "api_estavel", "description": "Nenhuma assinatura publica existente foi quebrada.", "gate": 9},
+    {"name": "legibilidade", "description": "Nomes e fluxo compreensiveis sem comentario explicativo.", "gate": 8}
+  ],
+  "max_cycles": 5,
+  "checks": [
+    {"name": "pytest", "run": "pytest -q", "timeout_s": 300},
+    {"name": "sem-debug", "run": "! grep -rn 'breakpoint()\\|pdb.set_trace' src", "timeout_s": 15}
+  ],
+  "persistence_dir": "runs/feature",
+  "run_id": "feature-01"
+}
