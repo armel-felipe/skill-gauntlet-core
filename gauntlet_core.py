@@ -18,6 +18,11 @@ DEFAULT_COVERAGE_GATE = 0.99
 DEFAULT_MAX_CYCLES = 5
 DEFAULT_TIMEOUT_S = 60
 MAX_CYCLES = 5
+REVIEW_REQUIRED = {"decision", "coverage", "criteria", "hard_failures", "feedback", "artifact"}
+REVIEW_OPTIONAL = {"coverage_gaps"}
+FEEDBACK_KEYS = {"criterion", "kind", "fix"}
+DECISIONS = {"approved", "feedback"}
+KINDS = {"required_fix", "optional_suggestion"}
 
 
 def _is_int(value):
@@ -177,3 +182,98 @@ def load_contract(path):
     if not result["valid"]:
         raise ValueError("; ".join(result["errors"]))
     return result["contract"]
+
+
+def validate_review(review, contract):
+    gates = {criterion["name"]: criterion for criterion in contract["criteria"]}
+    result = {"valid": False, "terminal": True, "errors": [], "quality_feedback": [],
+              "advisory": [], "gate_passed": False}
+    if not isinstance(review, dict):
+        result["errors"] = ["review root must be an object"]
+        return result
+
+    errors = []
+    unknown = set(review) - REVIEW_REQUIRED - REVIEW_OPTIONAL
+    if unknown:
+        errors.append(f"unknown review fields: {sorted(unknown)}")
+    missing = REVIEW_REQUIRED - set(review)
+    if missing:
+        errors.append(f"missing review fields: {sorted(missing)}")
+
+    decision = review.get("decision")
+    if decision not in DECISIONS:
+        errors.append("decision must be approved or feedback")
+
+    coverage = review.get("coverage")
+    if not _finite(coverage) or not 0 <= coverage <= 1:
+        errors.append("coverage must be a finite number between 0 and 1")
+
+    scores = review.get("criteria")
+    if not isinstance(scores, dict):
+        errors.append("criteria must be an object")
+        scores = {}
+    elif set(scores) != set(gates):
+        errors.append("criteria must match the contract criteria exactly")
+    for item_name, value in scores.items():
+        if not _is_int(value) or not 0 <= value <= 10:
+            errors.append(f"criteria.{item_name} must be an integer between 0 and 10")
+
+    hard_failures = review.get("hard_failures")
+    if not isinstance(hard_failures, list) or not all(
+        isinstance(item, str) and item.strip() for item in hard_failures
+    ):
+        errors.append("hard_failures must be a list of non-empty strings")
+        hard_failures = []
+
+    feedback = review.get("feedback")
+    if not isinstance(feedback, list):
+        errors.append("feedback must be a list")
+        feedback = []
+    for index, item in enumerate(feedback):
+        prefix = f"feedback[{index}]"
+        if not isinstance(item, dict):
+            errors.append(f"{prefix} must be an object")
+            continue
+        unknown = set(item) - FEEDBACK_KEYS
+        if unknown:
+            errors.append(f"{prefix} has unknown fields: {sorted(unknown)}")
+        if item.get("criterion") not in gates:
+            errors.append(f"{prefix}.criterion must be one of the contract criteria")
+        if item.get("kind", "required_fix") not in KINDS:
+            errors.append(f"{prefix}.kind must be required_fix or optional_suggestion")
+        fix = item.get("fix")
+        if not isinstance(fix, str) or not fix.strip():
+            errors.append(f"{prefix}.fix must be a non-empty string")
+
+    gaps = review.get("coverage_gaps", [])
+    if not isinstance(gaps, list) or not all(gap in gates for gap in gaps):
+        errors.append("coverage_gaps must be a list of contract criteria")
+
+    artifact = review.get("artifact")
+    if not isinstance(artifact, str) or not artifact.strip():
+        errors.append("artifact must be a non-empty string")
+    elif artifact != contract["artifact"]:
+        errors.append("artifact must match the contract artifact")
+
+    quality_feedback = []
+    advisory = []
+    if not errors:
+        for item_name, criterion in gates.items():
+            if scores[item_name] < criterion["gate"]:
+                target = quality_feedback if criterion["blocking"] else advisory
+                target.append(item_name)
+    gate_passed = (
+        not errors
+        and not quality_feedback
+        and not hard_failures
+        and _finite(coverage)
+        and coverage >= contract["coverage_gate"]
+    )
+    return {
+        "valid": not errors,
+        "terminal": bool(errors),
+        "errors": errors,
+        "quality_feedback": sorted(quality_feedback),
+        "advisory": sorted(advisory),
+        "gate_passed": gate_passed,
+    }
