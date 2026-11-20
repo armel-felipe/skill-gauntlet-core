@@ -593,3 +593,54 @@ def record_cycle(review, *, contract, cycle, workspace_root=None):
     if result["status"] != "retry":
         _atomic_write(directory / "state.json", result)
     return result
+
+
+def _resume(directory, contract, root):
+    if not directory.exists():
+        return 1, []
+    if not directory.is_dir() or any(item.is_symlink() for item in directory.iterdir()):
+        raise ValueError("invalid journal directory")
+    files = sorted(directory.glob("cycle-*.json"))
+    events = _load_json(directory / "events.json", [])
+    if not isinstance(events, list):
+        raise ValueError("journal events are not a list")
+    if len(events) != 3 * len(files):
+        raise ValueError("journal events are incomplete")
+    feedback = []
+    for index, path in enumerate(files, start=1):
+        payload = _load_json(path, None)
+        expected = [contract["run_id"], contract["artifact"], index]
+        if not isinstance(payload, dict) or payload.get("idempotency_key") != expected:
+            raise ValueError("journal cycle does not match the contract")
+        result = evaluate_cycle(
+            payload.get("review"), contract=contract, cycle=index, workspace_root=root
+        )
+        if result["status"] != "retry":
+            raise ValueError("journal contains a terminal cycle")
+        feedback = deepcopy(result["feedback"])
+    return len(files) + 1, feedback
+
+
+def run_gauntlet(executor, reviewer, contract, workspace_root=None):
+    validated = validate_contract(contract)
+    if not validated["valid"]:
+        raise ValueError("contract is invalid: " + "; ".join(validated["errors"]))
+    contract = validated["contract"]
+    root = Path.cwd().resolve() if workspace_root is None else Path(workspace_root).resolve()
+    directory = _journal_dir(contract, root)
+
+    if directory is not None and (directory / "state.json").exists():
+        return _load_json(directory / "state.json", None)
+
+    next_cycle, feedback = (1, []) if directory is None else _resume(directory, contract, root)
+
+    while next_cycle <= contract["max_cycles"]:
+        executor(deepcopy(feedback))
+        review = reviewer(contract["artifact"], deepcopy(feedback))
+        result = record_cycle(review, contract=contract, cycle=next_cycle, workspace_root=root)
+        if result["status"] != "retry":
+            return result
+        feedback = deepcopy(result["feedback"])
+        next_cycle += 1
+
+    raise ValueError("gauntlet exhausted without terminal result")
