@@ -24,6 +24,17 @@ def test_artifact_errors_missing(tmp_path):
     assert "artifact does not exist" in _artifact_errors(tmp_path, "out/artefato.md")
 
 
+def test_artifact_errors_accepts_unresolved_root(tmp_path):
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "out").mkdir()
+    (tmp_path / "out" / "artefato.md").write_text("conteudo", encoding="utf-8")
+    assert _artifact_errors(tmp_path / "sub" / "..", "out/artefato.md") == []
+
+
+def test_artifact_errors_rejects_escape(tmp_path):
+    assert _artifact_errors(tmp_path, "../fora.md") == ["artifact escapes the workspace"]
+
+
 def test_artifact_errors_empty_file(tmp_path):
     (tmp_path / "out").mkdir()
     (tmp_path / "out" / "artefato.md").write_text("", encoding="utf-8")

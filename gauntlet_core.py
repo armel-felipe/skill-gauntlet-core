@@ -285,6 +285,7 @@ def validate_review(review, contract):
 
 
 def _artifact_errors(root, artifact):
+    root = Path(root).resolve()
     path = root / artifact
     try:
         resolved = path.resolve(strict=False)
