@@ -1,0 +1,92 @@
+import json
+
+import pytest
+
+from gauntlet_core import load_contract, validate_contract
+
+
+def base_contract(**overrides):
+    contract = {
+        "name": "teste",
+        "goal": "gerar algo",
+        "artifact": "out/artefato.md",
+        "criteria": [{"name": "clareza", "description": "legivel", "gate": 9}],
+    }
+    contract.update(overrides)
+    return contract
+
+
+def test_applies_defaults():
+    result = validate_contract(base_contract())
+    assert result["valid"] is True
+    contract = result["contract"]
+    assert contract["coverage_gate"] == 0.99
+    assert contract["max_cycles"] == 5
+    assert contract["checks"] == []
+    assert contract["run_id"] == "run"
+    assert contract["persistence_dir"] is None
+    assert contract["criteria"][0]["blocking"] is True
+
+
+def test_rejects_absolute_artifact():
+    result = validate_contract(base_contract(artifact="/tmp/artefato.md"))
+    assert result["valid"] is False
+    assert any("artifact" in error for error in result["errors"])
+
+
+def test_rejects_artifact_escaping_workspace():
+    result = validate_contract(base_contract(artifact="../fora/artefato.md"))
+    assert result["valid"] is False
+
+
+@pytest.mark.parametrize("gate", [0, 11, True, 9.5, "9"])
+def test_rejects_invalid_gate(gate):
+    contract = base_contract(criteria=[{"name": "clareza", "description": "legivel", "gate": gate}])
+    assert validate_contract(contract)["valid"] is False
+
+
+def test_requires_one_blocking_criterion():
+    contract = base_contract(
+        criteria=[{"name": "ritmo", "description": "cadencia", "gate": 7, "blocking": False}]
+    )
+    result = validate_contract(contract)
+    assert result["valid"] is False
+    assert any("blocking" in error for error in result["errors"])
+
+
+def test_rejects_unknown_field():
+    assert validate_contract(base_contract(extra=1))["valid"] is False
+
+
+def test_rejects_duplicate_criterion_name():
+    contract = base_contract(
+        criteria=[
+            {"name": "clareza", "description": "a"},
+            {"name": "clareza", "description": "b"},
+        ]
+    )
+    assert validate_contract(contract)["valid"] is False
+
+
+def test_rejects_max_cycles_six():
+    assert validate_contract(base_contract(max_cycles=6))["valid"] is False
+
+
+def test_rejects_invalid_check_timeout():
+    contract = base_contract(checks=[{"name": "ok", "run": "true", "timeout_s": 0}])
+    assert validate_contract(contract)["valid"] is False
+
+
+def test_load_contract_reads_and_validates(tmp_path):
+    path = tmp_path / "contrato.json"
+    path.write_text(json.dumps(base_contract()), encoding="utf-8")
+    contract = load_contract(path)
+    assert contract["name"] == "teste"
+    assert contract["artifact"] == "out/artefato.md"
+
+
+def test_load_contract_raises_on_invalid_json(tmp_path):
+    path = tmp_path / "contrato.json"
+    path.write_text("{nao e json", encoding="utf-8")
+    with pytest.raises(ValueError, match="not valid JSON"):
+        load_contract(path)
